@@ -53,8 +53,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-iters", type=optional_int, default=None)
     parser.add_argument("--global-batch-size", type=int, default=GLOBAL_BATCH_SIZE)
     parser.add_argument("--save-interval", type=optional_int, default=None)
-    parser.add_argument("--eval-interval", type=optional_int, default=None)
-    parser.add_argument("--eval-iters", type=int, default=4)
     parser.add_argument("--lr-warmup-iters", type=optional_int, default=None)
     parser.add_argument("--lr-decay-iters", type=optional_int, default=None)
     parser.add_argument("--micro-batch-size", type=int, default=1)
@@ -96,13 +94,13 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.epochs < 1:
         parser.error("--epochs must be positive")
-    for name in ("packed_sequence_size", "pad_seq_to_mult", "global_batch_size", "eval_iters", "micro_batch_size",
+    for name in ("packed_sequence_size", "pad_seq_to_mult", "global_batch_size", "micro_batch_size",
                  "tensor_model_parallel_size", "pipeline_model_parallel_size", "context_parallel_size",
                  "expert_model_parallel_size", "expert_tensor_parallel_size", "mtp_num_layers",
                  "recompute_num_layers"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
-    for name in ("train_iters", "save_interval", "eval_interval", "lr_warmup_iters", "lr_decay_iters"):
+    for name in ("train_iters", "save_interval", "lr_warmup_iters", "lr_decay_iters"):
         value = getattr(args, name)
         if value is not None and value < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive when provided")
@@ -181,8 +179,6 @@ def build_config(args: argparse.Namespace, *, train_iters: int, save_interval: i
     cfg.train.train_iters = train_iters
     cfg.train.global_batch_size = args.global_batch_size
     cfg.train.micro_batch_size = args.micro_batch_size
-    cfg.validation.eval_interval = args.eval_interval or min(500, train_iters)
-    cfg.validation.eval_iters = args.eval_iters
     cfg.optimizer.lr = args.learning_rate
     cfg.optimizer.min_lr = args.min_learning_rate
     cfg.optimizer.adam_beta1 = args.adam_beta1
@@ -204,13 +200,12 @@ def build_config(args: argparse.Namespace, *, train_iters: int, save_interval: i
         seq_length=args.packed_sequence_size,
         seed=args.train_seed,
         dataloader_type="batch",
-        do_validation=True,
+        do_validation=False,
         do_test=False,
         packed_sequence_specs=PackedSequenceSpecs(
             packed_sequence_size=args.packed_sequence_size,
             pad_seq_to_mult=args.pad_seq_to_mult,
             packed_train_data_path=str(data_dir / "train" / "shard*.parquet"),
-            packed_val_data_path=str(data_dir / "val" / "shard*.parquet"),
         ),
         dataset_kwargs={
             "chat": True,
