@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-iters", type=optional_int, default=None)
     parser.add_argument("--global-batch-size", type=int, default=GLOBAL_BATCH_SIZE)
     parser.add_argument("--save-interval", type=optional_int, default=None)
+    parser.add_argument("--num-checkpoints", type=optional_int, default=None)
     parser.add_argument("--lr-warmup-iters", type=optional_int, default=None)
     parser.add_argument("--lr-warmup-fraction", type=optional_float, default=None)
     parser.add_argument("--lr-decay-iters", type=optional_int, default=None)
@@ -105,7 +106,7 @@ def parse_args() -> argparse.Namespace:
                  "recompute_num_layers"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
-    for name in ("train_iters", "save_interval"):
+    for name in ("train_iters", "save_interval", "num_checkpoints"):
         value = getattr(args, name)
         if value is not None and value < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive when provided")
@@ -113,6 +114,8 @@ def parse_args() -> argparse.Namespace:
         validate_scheduler_args(args)
     except ValueError as error:
         parser.error(str(error))
+    if args.save_interval is not None and args.num_checkpoints is not None:
+        parser.error("save_interval and num_checkpoints are mutually exclusive")
     if not args.checkpoint_load:
         args.checkpoint_load = None
     return args
@@ -199,9 +202,10 @@ def count_packed_samples(data_dir: Path) -> int:
     return sum(ParquetFile(path).metadata.num_rows for path in paths)
 
 
-def checkpoint_interval(train_iters: int, epochs: int) -> int:
-    """Return a step interval that saves approximately four checkpoints per epoch."""
-    return max(1, math.ceil(train_iters / (epochs * 4)))
+def checkpoint_interval(train_iters: int, epochs: int, num_checkpoints: int | None = None) -> int:
+    """Return a step interval from a requested count or four per epoch."""
+    count = num_checkpoints or (4 * epochs)
+    return max(1, math.ceil(train_iters / count))
 
 
 def build_config(args: argparse.Namespace, *, train_iters: int, save_interval: int):
@@ -309,7 +313,7 @@ def main() -> None:
     cfg = build_config(
         args,
         train_iters=train_iters,
-        save_interval=args.save_interval or checkpoint_interval(train_iters, args.epochs),
+        save_interval=args.save_interval or checkpoint_interval(train_iters, args.epochs, args.num_checkpoints),
     )
     if get_rank_safe() == 0:
         cfg.print_yaml()
