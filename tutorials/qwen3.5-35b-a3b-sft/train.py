@@ -54,7 +54,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--global-batch-size", type=int, default=GLOBAL_BATCH_SIZE)
     parser.add_argument("--save-interval", type=optional_int, default=None)
     parser.add_argument("--lr-warmup-iters", type=optional_int, default=None)
+    parser.add_argument("--lr-warmup-fraction", type=optional_float, default=None)
     parser.add_argument("--lr-decay-iters", type=optional_int, default=None)
+    parser.add_argument("--lr-decay-fraction", type=optional_float, default=None)
+    parser.add_argument("--lr-wsd-decay-iters", type=optional_int, default=None)
+    parser.add_argument("--lr-wsd-decay-fraction", type=optional_float, default=None)
+    parser.add_argument("--lr-wsd-decay-style", choices=("linear", "cosine", "exponential", "minus_sqrt"), default="linear")
     parser.add_argument("--micro-batch-size", type=int, default=1)
     parser.add_argument("--tensor-model-parallel-size", type=int, default=1)
     parser.add_argument("--sequence-parallel", type=str_to_bool, default=True)
@@ -82,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adam-beta2", type=float, default=0.98)
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--clip-grad", type=float, default=1.0)
-    parser.add_argument("--lr-decay-style", default="cosine")
+    parser.add_argument("--lr-decay-style", choices=("constant", "linear", "cosine", "WSD", "inverse-square-root"), default="cosine")
     parser.add_argument("--start-weight-decay", type=float, default=0.1)
     parser.add_argument("--end-weight-decay", type=float, default=0.1)
     parser.add_argument("--weight-decay-incr-style", default="constant")
@@ -100,10 +105,14 @@ def parse_args() -> argparse.Namespace:
                  "recompute_num_layers"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
-    for name in ("train_iters", "save_interval", "lr_warmup_iters", "lr_decay_iters"):
+    for name in ("train_iters", "save_interval"):
         value = getattr(args, name)
         if value is not None and value < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive when provided")
+    try:
+        validate_scheduler_args(args)
+    except ValueError as error:
+        parser.error(str(error))
     if not args.checkpoint_load:
         args.checkpoint_load = None
     return args
@@ -124,6 +133,62 @@ def optional_int(value: str) -> int | None:
     return None if value == "" else int(value)
 
 
+def optional_float(value: str) -> float | None:
+    """Treat an empty CLI value as an omitted optional fraction."""
+    return None if value == "" else float(value)
+
+
+def validate_scheduler_args(args: argparse.Namespace) -> None:
+    """Validate mutually exclusive lengths before loading training dependencies."""
+    for prefix in ("lr_decay", "lr_warmup", "lr_wsd_decay"):
+        iters = getattr(args, f"{prefix}_iters")
+        fraction = getattr(args, f"{prefix}_fraction")
+        if iters is not None and (type(iters) is not int or iters < 1):
+            raise ValueError(f"{prefix}_iters must be a positive integer")
+        if fraction is not None:
+            if type(fraction) not in (int, float) or not 0 < fraction <= 1:
+                raise ValueError(f"{prefix}_fraction must be in (0, 1]")
+            if iters is not None:
+                raise ValueError(f"{prefix}_iters and {prefix}_fraction are mutually exclusive")
+    if (args.lr_decay_style == "WSD"
+            and args.lr_wsd_decay_iters is None
+            and args.lr_wsd_decay_fraction is None):
+        raise ValueError("WSD requires lr_wsd_decay_iters or lr_wsd_decay_fraction")
+
+
+def resolve_scheduler_iters(args: argparse.Namespace, *, train_iters: int) -> tuple[int, int, int | None]:
+    """Resolve fractions to whole iterations and reject overlapping WSD phases.
+
+    The total schedule fraction uses train_iters; warmup and WSD fractions
+    use the resolved schedule length. Every fractional length rounds up.
+    """
+    validate_scheduler_args(args)
+    if train_iters < 1:
+        raise ValueError("train_iters must be positive")
+    decay_iters = args.lr_decay_iters
+    if decay_iters is None:
+        decay_iters = math.ceil(train_iters * args.lr_decay_fraction) if args.lr_decay_fraction is not None else train_iters
+    warmup_iters = args.lr_warmup_iters
+    if warmup_iters is None:
+        warmup_iters = (
+            math.ceil(decay_iters * args.lr_warmup_fraction)
+            if args.lr_warmup_fraction is not None
+            else min(500, max(1, math.ceil(train_iters * 0.1)))
+        )
+    if warmup_iters >= decay_iters:
+        raise ValueError(f"lr_warmup_iters ({warmup_iters}) must be less than lr_decay_iters ({decay_iters})")
+    wsd_iters = None
+    if args.lr_decay_style == "WSD":
+        wsd_iters = args.lr_wsd_decay_iters
+        if wsd_iters is None:
+            wsd_iters = math.ceil(decay_iters * args.lr_wsd_decay_fraction)
+        if warmup_iters + wsd_iters > decay_iters:
+            raise ValueError(
+                f"warmup ({warmup_iters}) + WSD decay ({wsd_iters}) exceeds lr_decay_iters ({decay_iters})"
+            )
+    return decay_iters, warmup_iters, wsd_iters
+
+
 def count_packed_samples(data_dir: Path) -> int:
     """Return the number of packed training sequences without loading their contents."""
     from pyarrow.parquet import ParquetFile
@@ -141,6 +206,8 @@ def checkpoint_interval(train_iters: int, epochs: int) -> int:
 
 def build_config(args: argparse.Namespace, *, train_iters: int, save_interval: int):
     """Build the fixed Qwen3.5-35B-A3B SFT recipe around experiment paths."""
+    decay_iters, warmup_iters, wsd_iters = resolve_scheduler_iters(args, train_iters=train_iters)
+
     data_dir = args.data_root / "packed" / f"seq-{args.packed_sequence_size}"
     checkpoint_dir = args.exp_dir / "checkpoints"
     tensorboard_dir = args.exp_dir / "tb_logs"
@@ -186,8 +253,12 @@ def build_config(args: argparse.Namespace, *, train_iters: int, save_interval: i
     cfg.optimizer.weight_decay = args.weight_decay
     cfg.optimizer.clip_grad = args.clip_grad
     cfg.scheduler.lr_decay_style = args.lr_decay_style
-    cfg.scheduler.lr_warmup_iters = args.lr_warmup_iters or min(500, max(1, math.ceil(train_iters * 0.1)))
-    cfg.scheduler.lr_decay_iters = args.lr_decay_iters or train_iters
+    # Resolve fractions here so each boundary falls on a whole training iteration.
+    cfg.scheduler.lr_warmup_fraction = None
+    cfg.scheduler.lr_warmup_iters = warmup_iters
+    cfg.scheduler.lr_decay_iters = decay_iters
+    cfg.scheduler.lr_wsd_decay_style = args.lr_wsd_decay_style
+    cfg.scheduler.lr_wsd_decay_iters = wsd_iters
     cfg.scheduler.start_weight_decay = args.start_weight_decay
     cfg.scheduler.end_weight_decay = args.end_weight_decay
     cfg.scheduler.weight_decay_incr_style = args.weight_decay_incr_style
