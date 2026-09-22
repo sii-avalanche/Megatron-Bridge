@@ -59,15 +59,16 @@ def _worker(args: tuple[Path, Path]) -> tuple[Path, Counter[str], int]:
                 obj = _load_json(raw.decode("utf-8").strip())
             except Exception:
                 continue
-            if isinstance(obj, list):
-                messages, domain = obj, source.parent.name
-            elif isinstance(obj, dict):
-                messages, domain = obj.get("messages"), obj.get("domain", source.parent.name)
-            else:
+            if not isinstance(obj, dict):
                 continue
+            output_obj = obj.get("trace", obj)
+            if not isinstance(output_obj, dict):
+                continue
+            messages = output_obj.get("messages")
+            domain = output_obj.get("domain", source.parent.name)
             if not isinstance(messages, list):
                 continue
-            output_file.write(_dump_json(obj))
+            output_file.write(_dump_json(output_obj))
             domains[str(domain)] += 1
             total += 1
     return temporary, domains, total
