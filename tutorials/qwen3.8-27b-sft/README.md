@@ -40,7 +40,15 @@ uv run python tutorials/qwen3.8-27b-sft/verify_data_contract.py \
 
 This bounded smoke checks tool and reasoning rendering, assistant-role masking,
 and the exact shifted loss mask after a Parquet pack/read roundtrip. A changed
-tokenizer fingerprint invalidates the evidence.
+tokenizer fingerprint invalidates the evidence. Record the exact evidence bytes
+before starting parallel pack jobs:
+
+```bash
+sha256sum /experiments/qwen38/tokenizer-contract/evidence.json
+```
+
+Every pack invocation must receive that lowercase digest. The packer rejects a
+missing paired argument or any evidence file whose current bytes do not match.
 
 ## Gate 2: checkpoint conversion and roundtrip export
 
@@ -70,7 +78,8 @@ uv run python tutorials/qwen3.8-27b-sft/pack.py \
   --output-path /data/cybergym/packed/seq-4096/train/shard-00000.parquet \
   --metadata-path /data/cybergym/packed/seq-4096/train/shard-00000.metadata.json \
   --hf-model-path /models/Qwen3.8-27B \
-  --contract-evidence /experiments/qwen38/tokenizer-contract/evidence.json
+  --contract-evidence /experiments/qwen38/tokenizer-contract/evidence.json \
+  --contract-evidence-sha256 REPLACE_WITH_64_LOWERCASE_HEX
 ```
 
 ## Gate 3: launch and resume training

@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 
 
@@ -55,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Evidence JSON emitted by verify_data_contract.py for this exact tokenizer snapshot.",
     )
+    parser.add_argument(
+        "--contract-evidence-sha256",
+        help="Expected lowercase SHA-256 of the exact contract evidence JSON bytes.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--packed-sequence-size", type=int, default=4096)
     parser.add_argument("--max-seq-length", type=int, default=4096)
@@ -71,7 +76,28 @@ def parse_args() -> argparse.Namespace:
         parser.error("sequence lengths must be positive")
     if args.pad_seq_to_mult < 1 or args.num_tokenizer_workers < 1:
         parser.error("--pad-seq-to-mult and --num-tokenizer-workers must be positive")
+    if (args.contract_evidence is None) != (args.contract_evidence_sha256 is None):
+        parser.error("--contract-evidence and --contract-evidence-sha256 must be provided together")
+    if (
+        args.contract_evidence_sha256 is not None
+        and re.fullmatch(r"[0-9a-f]{64}", args.contract_evidence_sha256) is None
+    ):
+        parser.error("--contract-evidence-sha256 must be 64 lowercase hex characters")
     return args
+
+
+def verify_file_sha256(path: Path, expected_sha256: str) -> None:
+    """Reject a file whose exact bytes do not match the configured identity."""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+    except FileNotFoundError as error:
+        raise ValueError(f"contract evidence does not exist: {path}") from error
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(f"contract evidence SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}")
 
 
 def tokenizer_contract_fingerprint(hf_model_path: Path) -> str:
@@ -241,6 +267,9 @@ def main() -> None:
     args = parse_args()
     if not args.input_path.is_file():
         raise FileNotFoundError(f"Input shard does not exist: {args.input_path}")
+    if args.contract_evidence is not None:
+        assert args.contract_evidence_sha256 is not None
+        verify_file_sha256(args.contract_evidence, args.contract_evidence_sha256)
     summary = validate_source_contract(
         args.input_path,
         hf_model_path=Path(args.hf_model_path),

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -156,6 +157,20 @@ def _write_contract_evidence(pack: ModuleType, path: Path, tokenizer_root: Path)
         },
     }
     path.write_text(json.dumps(evidence), encoding="utf-8")
+
+
+def test_contract_evidence_sha256_rejects_changed_bytes(tmp_path: Path) -> None:
+    """The workflow-provided evidence digest must bind the exact JSON bytes."""
+    pack = _load_pack_module()
+    evidence_path = tmp_path / "contract.json"
+    evidence_path.write_bytes(b'{"schema_version":1}')
+    expected = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+
+    pack.verify_file_sha256(evidence_path, expected)
+    evidence_path.write_bytes(b'{"schema_version":1,"changed":true}')
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        pack.verify_file_sha256(evidence_path, expected)
 
 
 def test_packer_accepts_only_evidenced_extended_chat_contract(tmp_path: Path) -> None:
