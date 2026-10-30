@@ -61,9 +61,12 @@ from .qwen35_vl import (
     qwen35_vl_800m_peft_config,
     qwen35_vl_800m_sft_config,
 )
+from .qwen38_vl import qwen38_vl_27b_sft_config
 
 
 __all__ = [
+    # Qwen3.8-VL SFT configs
+    "qwen38_vl_27b_sft_config",
     # Qwen3.5-VL pretrain configs
     "qwen35_vl_9b_pretrain_mock_config",
     "qwen35_vl_35b_a3b_pretrain_mock_config",
